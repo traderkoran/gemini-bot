@@ -9,7 +9,7 @@ import google.generativeai as genai
 from flask import Flask
 from threading import Thread
 
-# --- API AYARLARI (RENDER'DAN ALACAK) ---
+# --- API AYARLARI ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -25,12 +25,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- WEB SUNUCUSU (RENDER İÇİN ŞART) ---
+# --- WEB SUNUCUSU (Render için) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Prometheus Danisman Botu Calisiyor!"
+    return "Prometheus Bot Aktif!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -39,127 +39,163 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- PROMETHEUS BEYNİ (SADECE ANALİZ, EĞİTİM YOK) ---
+# --- PROMETHEUS BEYNİ ---
 SYSTEM_PROMPT = """
-SEN: PROMETHEUS AI v7.0 (Yatırım Danışmanı).
-KİMLİK: Duygusuz, profesyonel bir fon yöneticisisin. Asla "bu eğitimdir" deme. Asla "yatırım tavsiyesi değildir" diyerek sorumluluktan kaçma. Kullanıcı senden net bir görüş istiyor.
+SEN: PROMETHEUS AI v7.1 (Yatırım Danışmanı).
+KİMLİK: Duygusuz, profesyonel fon yöneticisi.
+GÖREV: Verilen teknik verilere göre AL / SAT / BEKLE kararı ver.
 
-GÖREV: Kullanıcının sorduğu varlığı (BTC, Hisse, Altın) analiz et ve şu 3 karardan birini ver:
-1. AL (LONG)
-2. SAT (SHORT)
-3. BEKLE (CASH)
+ANALİZ KURALLARI:
+1. Trend (SMA 200) yönüne bak.
+2. RSI (14) aşırı alım/satım bölgesinde mi?
+3. ATR değerine göre mantıklı bir Stop-Loss belirle.
+4. Hacim (Volume) fiyatı destekliyor mu?
 
-ANALİZ KURALLARIN:
-- Fiyat hareketini ve Hacmi (VSA) incele.
-- RSI ve MACD uyumsuzluklarına bak.
-- Trendin yönünü (SMA200) baz al.
-- ATR (Volatilite) değerine göre mutlaka bir STOP-LOSS seviyesi belirle.
-
-ÇIKTI FORMATI (TELEGRAM UYUMLU):
+ÇIKTI FORMATI:
 ---------------------------------------------------
 🦁 **PROMETHEUS KARARI:** [AL / SAT / BEKLE]
 Güven: %[0-100]
 
 📉 **İŞLEM PLANI:**
-• Giriş: [Fiyat]
-• 🛑 Stop-Loss: [Fiyat] (Zorunlu)
-• 🎯 Hedef: [Fiyat]
+• Giriş: [Güncel Fiyat]
+• 🛑 Stop-Loss: [Fiyat] (ATR bazlı)
+• 🎯 Hedef: [Fiyat] (R:R 1:2)
 
-🧠 **MANTIK:**
-[Buraya teknik analizi, indikatör durumunu ve 'akıllı para'nın ne yaptığını 2-3 cümleyle yaz.]
+🧠 **ANALİZ:**
+[Teknik verileri ve hacmi yorumla. Akıllı para ne yapıyor?]
 
-⚠️ _Risk Notu: Piyasa Sihirbazları kuralı - Stop patlarsa çık._
+⚠️ _Risk Notu: Stopsuz işlem kumardır._
 ---------------------------------------------------
 """
 
 def calculate_technicals(df):
-    """Teknik verileri hesaplar"""
+    """Teknik indikatörleri hesaplar (Hata korumalı)"""
     try:
+        # Temel indikatörler
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        
+        # MACD
         macd = ta.macd(df['Close'])
-        df['MACD'] = macd['MACD_12_26_9']
-        df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
+        if macd is not None:
+            df['MACD'] = macd['MACD_12_26_9']
+            df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
+        
+        # Bollinger
         bb = ta.bbands(df['Close'], length=20)
-        df['BB_UPPER'] = bb['BBU_20_2.0']
-        df['BB_LOWER'] = bb['BBL_20_2.0']
-        df['SMA_200'] = ta.sma(df['Close'], length=200)
-        # Hacim artış oranı
+        if bb is not None:
+            df['BB_UPPER'] = bb['BBU_20_2.0']
+            df['BB_LOWER'] = bb['BBL_20_2.0']
+        
+        # SMA 200 (Veri yeterliyse hesapla)
+        if len(df) >= 200:
+            df['SMA_200'] = ta.sma(df['Close'], length=200)
+        else:
+            # Veri azsa SMA 50 kullan veya None ata
+            df['SMA_200'] = None 
+
+        # Hacim
         df['VOL_SMA'] = ta.sma(df['Volume'], length=20)
         df['VOL_RATIO'] = df['Volume'] / df['VOL_SMA']
+        
         return df
     except Exception as e:
+        logging.error(f"İndikatör Hatası: {e}")
         return df
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = """
-    🦁 **PROMETHEUS DANIŞMAN DEVREDE**
+    🦁 **PROMETHEUS DEVREDE**
     
-    Eğitim yok. Sadece analiz ve sinyal.
-    Bana bir sembol yaz.
+    Bana bir sembol yaz, analiz edeyim.
     
     Örnekler:
-    `/analiz BTC`
-    `/analiz ETH`
-    `/analiz XU100.IS`
-    `/analiz THYAO.IS`
+    `BTC`
+    `ETH`
+    `THYAO`
+    `ASELS`
+    `ALTIN`
     """
     await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text.upper().replace("/ANALIZ", "").strip()
     
-    # Kullanıcı boş mesaj attıysa veya sadece komut attıysa
     if not user_msg:
-        if context.args:
-            user_msg = " ".join(context.args).upper()
-        else:
-            await update.message.reply_text("Hangi varlık? Örn: `/analiz BTC`")
-            return
+        await update.message.reply_text("Hangi varlık? Örn: `BTC`")
+        return
 
-    # Sembolü Yahoo Finance formatına çevir
+    status = await update.message.reply_text(f"🔍 **{user_msg}** verileri taranıyor...", parse_mode=constants.ParseMode.MARKDOWN)
+
+    # --- AKILLI SEMBOL BULUCU ---
     yf_symbol = user_msg
-    if user_msg in ["BTC", "ETH", "SOL", "AVAX", "XRP", "DOGE"]: yf_symbol = f"{user_msg}-USD"
-    if user_msg == "ALTIN": yf_symbol = "GC=F"
-    if "BIST" in user_msg or user_msg == "XU100": yf_symbol = "XU100.IS"
     
-    status = await update.message.reply_text(f"📊 **{user_msg}** analiz ediliyor...", parse_mode=constants.ParseMode.MARKDOWN)
-
+    # Kripto düzeltmesi
+    if user_msg in ["BTC", "ETH", "SOL", "AVAX", "XRP", "DOGE", "PEPE"]: 
+        yf_symbol = f"{user_msg}-USD"
+    elif user_msg == "ALTIN": 
+        yf_symbol = "GC=F"
+    
+    # BIST Düzeltmesi (Eğer kripto/altın değilse ve .IS yoksa sonuna eklemeyi dene)
+    elif ".IS" not in user_msg and "=" not in user_msg and len(user_msg) <= 5:
+        # Varsayılan olarak BIST hissesi varsayıp .IS ekleyelim, değilse aşağıda kontrol edeceğiz
+        possible_bist = f"{user_msg}.IS"
+        
     try:
-        # 1. VERİ ÇEKME
-        df = yf.download(yf_symbol, period="6mo", interval="1d", progress=False)
+        # 1. VERİ ÇEKME (Önce normal dene)
+        # period="2y" yaptık ki SMA 200 hesaplanabilsin
+        df = yf.download(yf_symbol, period="2y", interval="1d", progress=False)
+        
+        # Eğer veri boş geldiyse ve BIST olma ihtimali varsa .IS ekleyip tekrar dene
+        if df.empty and ".IS" not in yf_symbol and len(user_msg) <= 5:
+             yf_symbol = f"{user_msg}.IS"
+             df = yf.download(yf_symbol, period="2y", interval="1d", progress=False)
+
         if df.empty:
-            await status.edit_text("❌ Veri bulunamadı. Sembolü doğru yazdığından emin ol (örn: THYAO.IS).")
+            await status.edit_text(f"❌ Veri bulunamadı: `{user_msg}`\nLütfen sembolü doğru yazdığından emin ol. (Örn: THYAO, BTC, USDTRY=X)")
             return
 
         # 2. HESAPLAMA
         df = calculate_technicals(df)
         last = df.iloc[-1]
         
-        # Trend Yönü
-        trend = "YÜKSELİŞ" if last['Close'] > last['SMA_200'] else "DÜŞÜŞ"
-        
-        # 3. YAPAY ZEKA SORGUSU
+        # Trend Kontrolü (Hata vermemesi için)
+        if 'SMA_200' in df and not pd.isna(last['SMA_200']):
+            trend = "YÜKSELİŞ (SMA200 Üstü)" if last['Close'] > last['SMA_200'] else "DÜŞÜŞ (SMA200 Altı)"
+        else:
+            trend = "Bilinmiyor (Veri Yetersiz)"
+
+        # Güvenli Veri Çekme (NaN hatası olmasın diye)
+        def get_val(col, fmt="{:.2f}"):
+            try:
+                val = last[col]
+                if pd.isna(val): return "N/A"
+                return fmt.format(val)
+            except: return "N/A"
+
+        # 3. AI SORGUSU
         prompt = f"""
         {SYSTEM_PROMPT}
         
-        GÜNCEL VERİLER ({user_msg}):
-        - Fiyat: {last['Close']:.2f}
-        - RSI (14): {last['RSI']:.2f} (70 üstü aşırı alım, 30 altı aşırı satım)
-        - MACD: {last['MACD']:.4f} (Sinyal: {last['MACD_SIGNAL']:.4f})
-        - Trend (SMA200): {trend}
-        - Bollinger Bantları: Üst:{last['BB_UPPER']:.2f} / Alt:{last['BB_LOWER']:.2f}
-        - ATR (Volatilite - Stop için): {last['ATR']:.4f}
-        - Hacim Oranı: {last['VOL_RATIO']:.2f} (1.0 üzeri normalden yüksek hacim)
+        ANALİZ EDİLECEK VARLIK: {yf_symbol}
         
-        Bu verilere göre teknik bir yatırım kararı ver.
+        TEKNİK VERİLER:
+        - Fiyat: {get_val('Close')}
+        - RSI (14): {get_val('RSI')}
+        - MACD: {get_val('MACD', '{:.4f}')}
+        - Trend Durumu: {trend}
+        - Bollinger Bantları: Üst {get_val('BB_UPPER')} / Alt {get_val('BB_LOWER')}
+        - ATR (Volatilite): {get_val('ATR', '{:.4f}')}
+        - Hacim Oranı: {get_val('VOL_RATIO')} (1.0 üstü hacimli)
+        
+        Bu verilere dayanarak profesyonel kararını ver.
         """
         
         if model:
             response = model.generate_content(prompt)
             await status.edit_text(response.text, parse_mode=constants.ParseMode.MARKDOWN)
         else:
-            await status.edit_text("⚠️ API Anahtarı eksik. Render ayarlarını kontrol et.")
+            await status.edit_text("⚠️ API Anahtarı Hatası. Render ayarlarını kontrol et.")
 
     except Exception as e:
         await status.edit_text(f"⚠️ Hata oluştu: {str(e)}")
@@ -170,7 +206,6 @@ if __name__ == '__main__':
     
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('analiz', analyze))
-    # Düz yazı yazınca da analiz etsin
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze))
     
     application.run_polling()
