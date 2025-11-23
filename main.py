@@ -13,15 +13,15 @@ from threading import Thread
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Gemini Modelini Başlat
-# Hata almamak için en standart model olan 'gemini-pro' veya 'gemini-1.5-flash' kullanıyoruz.
+# Gemini Modelini Başlat - GÜNCEL MODEL
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     try:
-        # Önce Flash'ı dene, olmazsa Pro'ya düş
+        # GÜNCEL MODEL İSMİ
         model = genai.GenerativeModel('gemini-1.5-flash')
-    except:
-        model = genai.GenerativeModel('gemini-pro')
+    except Exception as e:
+        logging.warning(f"Gemini model hatası: {e}")
+        model = None
 else:
     model = None
 
@@ -31,17 +31,18 @@ logging.basicConfig(
 )
 
 # --- WEB SUNUCUSU ---
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Prometheus Bot Aktif!"
+    return "🦁 Prometheus Bot Aktif!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
     t = Thread(target=run)
+    t.daemon = True
     t.start()
 
 # --- PROMETHEUS BEYNİ ---
@@ -80,26 +81,52 @@ def calculate_technicals(df):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
+        # RSI hesapla
         df['RSI'] = ta.rsi(df['Close'], length=14)
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         
-        macd = ta.macd(df['Close'])
-        if macd is not None:
-            df['MACD'] = macd['MACD_12_26_9']
-            df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
-        
-        bb = ta.bbands(df['Close'], length=20)
-        if bb is not None:
-            df['BB_UPPER'] = bb['BBU_20_2.0']
-            df['BB_LOWER'] = bb['BBL_20_2.0']
-        
-        if len(df) >= 200:
-            df['SMA_200'] = ta.sma(df['Close'], length=200)
+        # ATR hesapla - pandas_ta formatına uygun
+        atr_result = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+        if atr_result is not None:
+            df['ATR'] = atr_result
         else:
-            df['SMA_200'] = None 
+            df['ATR'] = 0
+            
+        # MACD hesapla
+        macd_result = ta.macd(df['Close'])
+        if macd_result is not None:
+            df['MACD'] = macd_result['MACD_12_26_9']
+            df['MACD_SIGNAL'] = macd_result['MACDs_12_26_9']
+        else:
+            df['MACD'] = 0
+            df['MACD_SIGNAL'] = 0
+        
+        # Bollinger Bands
+        bb_result = ta.bbands(df['Close'], length=20)
+        if bb_result is not None:
+            df['BB_UPPER'] = bb_result['BBU_20_2.0']
+            df['BB_LOWER'] = bb_result['BBL_20_2.0']
+        else:
+            df['BB_UPPER'] = df['Close']
+            df['BB_LOWER'] = df['Close']
+        
+        # SMA 200
+        if len(df) >= 200:
+            sma_result = ta.sma(df['Close'], length=200)
+            if sma_result is not None:
+                df['SMA_200'] = sma_result
+            else:
+                df['SMA_200'] = df['Close']
+        else:
+            df['SMA_200'] = df['Close']
 
-        df['VOL_SMA'] = ta.sma(df['Volume'], length=20)
-        df['VOL_RATIO'] = df['Volume'] / df['VOL_SMA'].replace(0, 1)
+        # Volume analizi
+        volume_sma = ta.sma(df['Volume'], length=20)
+        if volume_sma is not None:
+            df['VOL_SMA'] = volume_sma
+            df['VOL_RATIO'] = df['Volume'] / df['VOL_SMA'].replace(0, 1)
+        else:
+            df['VOL_SMA'] = df['Volume']
+            df['VOL_RATIO'] = 1
         
         return df
     except Exception as e:
@@ -112,81 +139,158 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     Bana bir sembol yaz, analiz edeyim.
     Örnek: `BTC`, `ETH`, `THYAO`, `ALTIN`
+    
+    Komutlar:
+    /start - Botu başlat
+    /analiz [sembol] - Teknik analiz yap
     """
     await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_msg = update.message.text.upper().replace("/ANALIZ", "").strip()
+    user_input = update.message.text.upper().strip()
+    
+    # Komutları temizle
+    user_msg = user_input.replace("/ANALIZ", "").replace("/ANALIZ ", "").strip()
     
     if not user_msg:
-        await update.message.reply_text("Hangi varlık? Örn: `BTC`")
+        await update.message.reply_text("Hangi varlık? Örn: `BTC` veya `THYAO`")
         return
 
-    status = await update.message.reply_text(f"🔍 **{user_msg}** verileri taranıyor...", parse_mode=constants.ParseMode.MARKDOWN)
+    status_msg = await update.message.reply_text(f"🔍 **{user_msg}** verileri taranıyor...", parse_mode=constants.ParseMode.MARKDOWN)
 
+    # Sembol dönüşümü
     yf_symbol = user_msg
-    if user_msg in ["BTC", "ETH", "SOL", "AVAX", "XRP", "DOGE"]: yf_symbol = f"{user_msg}-USD"
-    elif user_msg == "ALTIN": yf_symbol = "GC=F"
+    if user_msg in ["BTC", "ETH", "SOL", "AVAX", "XRP", "DOGE", "ADA", "DOT"]:
+        yf_symbol = f"{user_msg}-USD"
+    elif user_msg == "ALTIN":
+        yf_symbol = "GC=F"
+    elif user_msg == "GÜMÜŞ":
+        yf_symbol = "SI=F"
+    elif user_msg == "PETROL":
+        yf_symbol = "CL=F"
     elif ".IS" not in user_msg and "=" not in user_msg and len(user_msg) <= 5:
-        yf_symbol = f"{user_msg}.IS" # Varsayılan BIST varsay
+        yf_symbol = f"{user_msg}.IS"
 
     try:
-        # Veri Çekme (Hata yakalamalı)
-        try:
-            df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=False)
-        except:
-             # Eğer hata verirse .IS'siz dene (Belki ABD hissesidir)
-             df = yf.download(user_msg, period="2y", interval="1d", progress=False, auto_adjust=False)
-
+        # Veri Çekme
+        df = yf.download(yf_symbol, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        
         if df.empty:
-            await status.edit_text(f"❌ Veri bulunamadı: `{user_msg}`")
-            return
+            # Alternatif sembol dene
+            df = yf.download(user_msg, period="6mo", interval="1d", progress=False, auto_adjust=True)
+            if df.empty:
+                await status_msg.edit_text(f"❌ Veri bulunamadı: `{user_msg}`")
+                return
 
         df = calculate_technicals(df)
+        
+        if df.empty:
+            await status_msg.edit_text(f"❌ Analiz için yeterli veri yok: `{user_msg}`")
+            return
+            
         last = df.iloc[-1]
         
+        # Trend analizi
         if 'SMA_200' in df and not pd.isna(last['SMA_200']):
             trend = "YÜKSELİŞ" if last['Close'] > last['SMA_200'] else "DÜŞÜŞ"
+            trend_strength = abs((last['Close'] - last['SMA_200']) / last['SMA_200'] * 100)
         else:
-            trend = "Bilinmiyor"
+            trend = "NÖTR"
+            trend_strength = 0
 
-        def get_val(col):
+        # Değerleri formatla
+        def safe_get(col, default="N/A"):
             try:
-                val = last[col]
-                return "N/A" if pd.isna(val) else "{:.2f}".format(val)
-            except: return "N/A"
+                if col in last and not pd.isna(last[col]):
+                    if col in ['RSI', 'MACD', 'MACD_SIGNAL', 'VOL_RATIO']:
+                        return f"{last[col]:.2f}"
+                    elif col in ['Close', 'ATR', 'BB_UPPER', 'BB_LOWER', 'SMA_200']:
+                        return f"{last[col]:.2f}"
+                return default
+            except:
+                return default
 
-        prompt = f"""
-        {SYSTEM_PROMPT}
-        VARLIK: {yf_symbol}
-        Fiyat: {get_val('Close')}
-        RSI: {get_val('RSI')}
-        MACD: {get_val('MACD')}
-        Trend: {trend}
-        Bollinger: {get_val('BB_UPPER')} / {get_val('BB_LOWER')}
-        ATR: {get_val('ATR')}
-        Hacim Oranı: {get_val('VOL_RATIO')}
-        Karar ver.
-        """
-        
+        # Gemini AI analizi
         if model:
-            # Hata korumalı Gemini isteği
             try:
+                prompt = f"""
+                {SYSTEM_PROMPT}
+                
+                VARLIK: {user_msg} ({yf_symbol})
+                Fiyat: {safe_get('Close')}
+                RSI: {safe_get('RSI')}
+                MACD: {safe_get('MACD')}
+                Trend: {trend} (%{trend_strength:.1f})
+                Bollinger Üst: {safe_get('BB_UPPER')} / Alt: {safe_get('BB_LOWER')}
+                ATR: {safe_get('ATR')}
+                Hacim Oranı: {safe_get('VOL_RATIO')}x
+                
+                Karar ver:
+                """
+                
                 response = model.generate_content(prompt)
-                await status.edit_text(response.text, parse_mode=constants.ParseMode.MARKDOWN)
+                analysis_result = response.text
+                
             except Exception as e:
-                 # Eğer 1.5-flash hata verirse kullanıcıya bildir
-                 await status.edit_text(f"⚠️ Yapay Zeka Hatası: {str(e)}\nAPI Key'i kontrol et veya model desteklenmiyor.")
+                logging.error(f"Gemini hatası: {e}")
+                # Gemini olmadan basit analiz
+                current_price = safe_get('Close', '0')
+                atr_val = float(safe_get('ATR', '0'))
+                rsi_val = float(safe_get('RSI', '50'))
+                
+                if rsi_val < 30 and trend == "YÜKSELİŞ":
+                    signal = "AL"
+                    confidence = "75"
+                elif rsi_val > 70 and trend == "DÜŞÜŞ":
+                    signal = "SAT"
+                    confidence = "70"
+                else:
+                    signal = "BEKLE"
+                    confidence = "60"
+                    
+                stop_loss = float(current_price) - (2 * atr_val) if signal == "AL" else float(current_price) + (2 * atr_val)
+                target = float(current_price) + (4 * atr_val) if signal == "AL" else float(current_price) - (4 * atr_val)
+                
+                analysis_result = f"""
+---------------------------------------------------
+🦁 **PROMETHEUS KARARI:** {signal}
+Güven: %{confidence}
+
+📉 **İŞLEM PLANI:**
+• Giriş: {current_price}
+• 🛑 Stop-Loss: {stop_loss:.2f} (ATR bazlı)
+• 🎯 Hedef: {target:.2f} (R:R 1:2)
+
+🧠 **ANALİZ:**
+RSI: {rsi_val:.1f}, Trend: {trend}
+Temel teknik göstergelere göre karar verildi.
+
+⚠️ _Risk Notu: Stopsuz işlem kumardır._
+---------------------------------------------------
+                """
         else:
-            await status.edit_text("⚠️ API Anahtarı eksik.")
+            # API anahtarı yoksa basit analiz
+            analysis_result = "⚠️ Gemini AI anahtarı eksik. Temel analiz yapılamıyor."
+
+        await status_msg.edit_text(analysis_result, parse_mode=constants.ParseMode.MARKDOWN)
 
     except Exception as e:
-        await status.edit_text(f"⚠️ Hata: {str(e)}")
+        logging.error(f"Genel hata: {e}")
+        await status_msg.edit_text(f"⚠️ İşlem hatası: {str(e)}")
+
+# Telegram Bot Başlatma
+def start_bot():
+    if TELEGRAM_TOKEN:
+        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("analiz", analyze))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze))
+        
+        # Webhook kullanarak conflict hatasını önle
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    else:
+        logging.warning("Telegram token bulunamadı!")
 
 if __name__ == '__main__':
     keep_alive()
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('analiz', analyze))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze))
-    application.run_polling()
+    start_bot()
