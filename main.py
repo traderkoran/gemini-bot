@@ -14,9 +14,14 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # Gemini Modelini Başlat
+# Hata almamak için en standart model olan 'gemini-pro' veya 'gemini-1.5-flash' kullanıyoruz.
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        # Önce Flash'ı dene, olmazsa Pro'ya düş
+        model = genai.GenerativeModel('gemini-1.5-flash')
+    except:
+        model = genai.GenerativeModel('gemini-pro')
 else:
     model = None
 
@@ -41,7 +46,7 @@ def keep_alive():
 
 # --- PROMETHEUS BEYNİ ---
 SYSTEM_PROMPT = """
-SEN: PROMETHEUS AI v7.2 (Yatırım Danışmanı).
+SEN: PROMETHEUS AI v7.3 (Yatırım Danışmanı).
 KİMLİK: Duygusuz, profesyonel fon yöneticisi.
 GÖREV: Verilen teknik verilere göre AL / SAT / BEKLE kararı ver.
 
@@ -69,39 +74,31 @@ Güven: %[0-100]
 """
 
 def calculate_technicals(df):
-    """Teknik indikatörleri hesaplar (Yfinance Güncelleme Uyumlu)"""
+    """Teknik indikatörleri hesaplar"""
     try:
-        # --- YFINANCE DÜZELTMESİ (MULTI-INDEX FIX) ---
-        # Eğer veri çok katmanlı gelirse (Ticker başlığı varsa) onu düzleştir
+        # Yfinance MultiIndex Düzeltmesi
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        
-        # Temel indikatörler
+            
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
         
-        # MACD
         macd = ta.macd(df['Close'])
         if macd is not None:
             df['MACD'] = macd['MACD_12_26_9']
             df['MACD_SIGNAL'] = macd['MACDs_12_26_9']
         
-        # Bollinger
         bb = ta.bbands(df['Close'], length=20)
         if bb is not None:
             df['BB_UPPER'] = bb['BBU_20_2.0']
             df['BB_LOWER'] = bb['BBL_20_2.0']
         
-        # SMA 200
         if len(df) >= 200:
             df['SMA_200'] = ta.sma(df['Close'], length=200)
         else:
             df['SMA_200'] = None 
 
-        # Hacim
         df['VOL_SMA'] = ta.sma(df['Volume'], length=20)
-        
-        # Hacim Oranı (Sıfıra bölünme hatasını önle)
         df['VOL_RATIO'] = df['Volume'] / df['VOL_SMA'].replace(0, 1)
         
         return df
@@ -114,13 +111,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     🦁 **PROMETHEUS DEVREDE**
     
     Bana bir sembol yaz, analiz edeyim.
-    
-    Örnekler:
-    `BTC`
-    `ETH`
-    `THYAO`
-    `ASELS`
-    `ALTIN`
+    Örnek: `BTC`, `ETH`, `THYAO`, `ALTIN`
     """
     await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
 
@@ -133,83 +124,69 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text(f"🔍 **{user_msg}** verileri taranıyor...", parse_mode=constants.ParseMode.MARKDOWN)
 
-    # --- AKILLI SEMBOL BULUCU ---
     yf_symbol = user_msg
-    
-    # Kripto düzeltmesi
-    if user_msg in ["BTC", "ETH", "SOL", "AVAX", "XRP", "DOGE", "PEPE"]: 
-        yf_symbol = f"{user_msg}-USD"
-    elif user_msg == "ALTIN": 
-        yf_symbol = "GC=F"
-    # BIST Düzeltmesi
+    if user_msg in ["BTC", "ETH", "SOL", "AVAX", "XRP", "DOGE"]: yf_symbol = f"{user_msg}-USD"
+    elif user_msg == "ALTIN": yf_symbol = "GC=F"
     elif ".IS" not in user_msg and "=" not in user_msg and len(user_msg) <= 5:
-        possible_bist = f"{user_msg}.IS"
-        
+        yf_symbol = f"{user_msg}.IS" # Varsayılan BIST varsay
+
     try:
-        # 1. VERİ ÇEKME
-        # auto_adjust=False ekledik, hata uyarısını da çözer
-        df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=False)
-        
-        # Eğer veri boş geldiyse ve BIST ihtimali varsa
-        if df.empty and ".IS" not in yf_symbol and len(user_msg) <= 5:
-             yf_symbol = f"{user_msg}.IS"
-             df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=False)
+        # Veri Çekme (Hata yakalamalı)
+        try:
+            df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=False)
+        except:
+             # Eğer hata verirse .IS'siz dene (Belki ABD hissesidir)
+             df = yf.download(user_msg, period="2y", interval="1d", progress=False, auto_adjust=False)
 
         if df.empty:
-            await status.edit_text(f"❌ Veri bulunamadı: `{user_msg}`\nSembolü kontrol et.")
+            await status.edit_text(f"❌ Veri bulunamadı: `{user_msg}`")
             return
 
-        # 2. HESAPLAMA
         df = calculate_technicals(df)
         last = df.iloc[-1]
         
-        # Trend
         if 'SMA_200' in df and not pd.isna(last['SMA_200']):
-            trend = "YÜKSELİŞ (SMA200 Üstü)" if last['Close'] > last['SMA_200'] else "DÜŞÜŞ (SMA200 Altı)"
+            trend = "YÜKSELİŞ" if last['Close'] > last['SMA_200'] else "DÜŞÜŞ"
         else:
             trend = "Bilinmiyor"
 
-        def get_val(col, fmt="{:.2f}"):
+        def get_val(col):
             try:
                 val = last[col]
-                if pd.isna(val): return "N/A"
-                return fmt.format(val)
+                return "N/A" if pd.isna(val) else "{:.2f}".format(val)
             except: return "N/A"
 
-        # 3. AI SORGUSU
         prompt = f"""
         {SYSTEM_PROMPT}
-        
-        ANALİZ EDİLECEK VARLIK: {yf_symbol}
-        
-        TEKNİK VERİLER:
-        - Fiyat: {get_val('Close')}
-        - RSI (14): {get_val('RSI')}
-        - MACD: {get_val('MACD', '{:.4f}')}
-        - Trend Durumu: {trend}
-        - Bollinger Bantları: Üst {get_val('BB_UPPER')} / Alt {get_val('BB_LOWER')}
-        - ATR (Volatilite): {get_val('ATR', '{:.4f}')}
-        - Hacim Oranı: {get_val('VOL_RATIO')} (1.0 üstü hacimli)
-        
-        Bu verilere dayanarak profesyonel kararını ver.
+        VARLIK: {yf_symbol}
+        Fiyat: {get_val('Close')}
+        RSI: {get_val('RSI')}
+        MACD: {get_val('MACD')}
+        Trend: {trend}
+        Bollinger: {get_val('BB_UPPER')} / {get_val('BB_LOWER')}
+        ATR: {get_val('ATR')}
+        Hacim Oranı: {get_val('VOL_RATIO')}
+        Karar ver.
         """
         
         if model:
-            response = model.generate_content(prompt)
-            await status.edit_text(response.text, parse_mode=constants.ParseMode.MARKDOWN)
+            # Hata korumalı Gemini isteği
+            try:
+                response = model.generate_content(prompt)
+                await status.edit_text(response.text, parse_mode=constants.ParseMode.MARKDOWN)
+            except Exception as e:
+                 # Eğer 1.5-flash hata verirse kullanıcıya bildir
+                 await status.edit_text(f"⚠️ Yapay Zeka Hatası: {str(e)}\nAPI Key'i kontrol et veya model desteklenmiyor.")
         else:
-            await status.edit_text("⚠️ API Anahtarı Hatası.")
+            await status.edit_text("⚠️ API Anahtarı eksik.")
 
     except Exception as e:
-        logging.error(f"Hata detayı: {e}")
-        await status.edit_text(f"⚠️ Teknik bir hata oluştu: {str(e)}")
+        await status.edit_text(f"⚠️ Hata: {str(e)}")
 
 if __name__ == '__main__':
     keep_alive()
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('analiz', analyze))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze))
-    
     application.run_polling()
