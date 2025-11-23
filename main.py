@@ -25,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- WEB SUNUCUSU (Render için) ---
+# --- WEB SUNUCUSU ---
 app = Flask('')
 
 @app.route('/')
@@ -41,7 +41,7 @@ def keep_alive():
 
 # --- PROMETHEUS BEYNİ ---
 SYSTEM_PROMPT = """
-SEN: PROMETHEUS AI v7.1 (Yatırım Danışmanı).
+SEN: PROMETHEUS AI v7.2 (Yatırım Danışmanı).
 KİMLİK: Duygusuz, profesyonel fon yöneticisi.
 GÖREV: Verilen teknik verilere göre AL / SAT / BEKLE kararı ver.
 
@@ -69,8 +69,13 @@ Güven: %[0-100]
 """
 
 def calculate_technicals(df):
-    """Teknik indikatörleri hesaplar (Hata korumalı)"""
+    """Teknik indikatörleri hesaplar (Yfinance Güncelleme Uyumlu)"""
     try:
+        # --- YFINANCE DÜZELTMESİ (MULTI-INDEX FIX) ---
+        # Eğer veri çok katmanlı gelirse (Ticker başlığı varsa) onu düzleştir
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
         # Temel indikatörler
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
@@ -87,16 +92,17 @@ def calculate_technicals(df):
             df['BB_UPPER'] = bb['BBU_20_2.0']
             df['BB_LOWER'] = bb['BBL_20_2.0']
         
-        # SMA 200 (Veri yeterliyse hesapla)
+        # SMA 200
         if len(df) >= 200:
             df['SMA_200'] = ta.sma(df['Close'], length=200)
         else:
-            # Veri azsa SMA 50 kullan veya None ata
             df['SMA_200'] = None 
 
         # Hacim
         df['VOL_SMA'] = ta.sma(df['Volume'], length=20)
-        df['VOL_RATIO'] = df['Volume'] / df['VOL_SMA']
+        
+        # Hacim Oranı (Sıfıra bölünme hatasını önle)
+        df['VOL_RATIO'] = df['Volume'] / df['VOL_SMA'].replace(0, 1)
         
         return df
     except Exception as e:
@@ -135,37 +141,34 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         yf_symbol = f"{user_msg}-USD"
     elif user_msg == "ALTIN": 
         yf_symbol = "GC=F"
-    
-    # BIST Düzeltmesi (Eğer kripto/altın değilse ve .IS yoksa sonuna eklemeyi dene)
+    # BIST Düzeltmesi
     elif ".IS" not in user_msg and "=" not in user_msg and len(user_msg) <= 5:
-        # Varsayılan olarak BIST hissesi varsayıp .IS ekleyelim, değilse aşağıda kontrol edeceğiz
         possible_bist = f"{user_msg}.IS"
         
     try:
-        # 1. VERİ ÇEKME (Önce normal dene)
-        # period="2y" yaptık ki SMA 200 hesaplanabilsin
-        df = yf.download(yf_symbol, period="2y", interval="1d", progress=False)
+        # 1. VERİ ÇEKME
+        # auto_adjust=False ekledik, hata uyarısını da çözer
+        df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=False)
         
-        # Eğer veri boş geldiyse ve BIST olma ihtimali varsa .IS ekleyip tekrar dene
+        # Eğer veri boş geldiyse ve BIST ihtimali varsa
         if df.empty and ".IS" not in yf_symbol and len(user_msg) <= 5:
              yf_symbol = f"{user_msg}.IS"
-             df = yf.download(yf_symbol, period="2y", interval="1d", progress=False)
+             df = yf.download(yf_symbol, period="2y", interval="1d", progress=False, auto_adjust=False)
 
         if df.empty:
-            await status.edit_text(f"❌ Veri bulunamadı: `{user_msg}`\nLütfen sembolü doğru yazdığından emin ol. (Örn: THYAO, BTC, USDTRY=X)")
+            await status.edit_text(f"❌ Veri bulunamadı: `{user_msg}`\nSembolü kontrol et.")
             return
 
         # 2. HESAPLAMA
         df = calculate_technicals(df)
         last = df.iloc[-1]
         
-        # Trend Kontrolü (Hata vermemesi için)
+        # Trend
         if 'SMA_200' in df and not pd.isna(last['SMA_200']):
             trend = "YÜKSELİŞ (SMA200 Üstü)" if last['Close'] > last['SMA_200'] else "DÜŞÜŞ (SMA200 Altı)"
         else:
-            trend = "Bilinmiyor (Veri Yetersiz)"
+            trend = "Bilinmiyor"
 
-        # Güvenli Veri Çekme (NaN hatası olmasın diye)
         def get_val(col, fmt="{:.2f}"):
             try:
                 val = last[col]
@@ -195,10 +198,11 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = model.generate_content(prompt)
             await status.edit_text(response.text, parse_mode=constants.ParseMode.MARKDOWN)
         else:
-            await status.edit_text("⚠️ API Anahtarı Hatası. Render ayarlarını kontrol et.")
+            await status.edit_text("⚠️ API Anahtarı Hatası.")
 
     except Exception as e:
-        await status.edit_text(f"⚠️ Hata oluştu: {str(e)}")
+        logging.error(f"Hata detayı: {e}")
+        await status.edit_text(f"⚠️ Teknik bir hata oluştu: {str(e)}")
 
 if __name__ == '__main__':
     keep_alive()
