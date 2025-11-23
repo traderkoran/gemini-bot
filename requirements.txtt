@@ -1,0 +1,8 @@
+python-telegram-bot>=21.9
+google-generativeai>=0.3.2
+yfinance>=0.2.36
+pandas>=2.2.0
+pandas_ta>=0.3.14b0
+flask>=3.0.0
+numpy>=1.26.0
+requests>=2.31.0
