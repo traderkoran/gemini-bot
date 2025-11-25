@@ -12,12 +12,10 @@ from threading import Thread
 import requests
 import json
 from datetime import datetime, timedelta
-import ta as technical_analysis  # Diğer teknik analiz kütüphanesi
 
 # --- GELİŞMİŞ API AYARLARI ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")  # Fundamental analiz için
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -146,22 +144,37 @@ class AdvancedTechnicalAnalyzer:
     def calculate_all_indicators(self, df):
         """Tüm teknik göstergeleri hesapla"""
         try:
+            # DataFrame kontrolü
+            if df.empty:
+                return df
+                
             # Momentum Indicators
             df['RSI_14'] = ta.rsi(df['Close'], length=14)
             df['RSI_21'] = ta.rsi(df['Close'], length=21)
             
-            # MACD with multiple variants
-            macd = ta.macd(df['Close'])
-            if macd is not None:
-                df['MACD'] = macd['MACD_12_26_9']
-                df['MACD_Signal'] = macd['MACDs_12_26_9']
-                df['MACD_Histogram'] = macd['MACDh_12_26_9']
+            # MACD
+            try:
+                macd = ta.macd(df['Close'])
+                if macd is not None:
+                    df['MACD'] = macd.get('MACD_12_26_9', 0)
+                    df['MACD_Signal'] = macd.get('MACDs_12_26_9', 0)
+                    df['MACD_Histogram'] = macd.get('MACDh_12_26_9', 0)
+            except Exception as e:
+                logging.warning(f"MACD hesaplama hatası: {e}")
+                df['MACD'] = 0
+                df['MACD_Signal'] = 0
+                df['MACD_Histogram'] = 0
             
             # Stochastic
-            stoch = ta.stoch(df['High'], df['Low'], df['Close'])
-            if stoch is not None:
-                df['STOCH_K'] = stoch['STOCHk_14_3_3']
-                df['STOCH_D'] = stoch['STOCHd_14_3_3']
+            try:
+                stoch = ta.stoch(df['High'], df['Low'], df['Close'])
+                if stoch is not None:
+                    df['STOCH_K'] = stoch.get('STOCHk_14_3_3', 50)
+                    df['STOCH_D'] = stoch.get('STOCHd_14_3_3', 50)
+            except Exception as e:
+                logging.warning(f"Stochastic hesaplama hatası: {e}")
+                df['STOCH_K'] = 50
+                df['STOCH_D'] = 50
             
             # Williams %R
             df['WILLIAMS_R'] = ta.willr(df['High'], df['Low'], df['Close'], length=14)
@@ -170,13 +183,19 @@ class AdvancedTechnicalAnalyzer:
             df['CCI'] = ta.cci(df['High'], df['Low'], df['Close'], length=20)
             
             # ADX - Trend Strength
-            adx_data = ta.adx(df['High'], df['Low'], df['Close'])
-            if adx_data is not None:
-                df['ADX'] = adx_data['ADX_14']
-                df['DMP'] = adx_data['DMP_14']
-                df['DMN'] = adx_data['DMN_14']
+            try:
+                adx_data = ta.adx(df['High'], df['Low'], df['Close'])
+                if adx_data is not None:
+                    df['ADX'] = adx_data.get('ADX_14', 20)
+                    df['DMP'] = adx_data.get('DMP_14', 0)
+                    df['DMN'] = adx_data.get('DMN_14', 0)
+            except Exception as e:
+                logging.warning(f"ADX hesaplama hatası: {e}")
+                df['ADX'] = 20
+                df['DMP'] = 0
+                df['DMN'] = 0
             
-            # Moving Averages (9 types)
+            # Moving Averages
             df['SMA_20'] = ta.sma(df['Close'], length=20)
             df['SMA_50'] = ta.sma(df['Close'], length=50)
             df['SMA_200'] = ta.sma(df['Close'], length=200)
@@ -184,18 +203,26 @@ class AdvancedTechnicalAnalyzer:
             df['EMA_50'] = ta.ema(df['Close'], length=50)
             
             # Volatility Indicators
-            bb = ta.bbands(df['Close'], length=20)
-            if bb is not None:
-                df['BB_UPPER'] = bb['BBU_20_2.0']
-                df['BB_MIDDLE'] = bb['BBM_20_2.0']
-                df['BB_LOWER'] = bb['BBL_20_2.0']
-                df['BB_WIDTH'] = (df['BB_UPPER'] - df['BB_LOWER']) / df['BB_MIDDLE']
+            try:
+                bb = ta.bbands(df['Close'], length=20)
+                if bb is not None:
+                    df['BB_UPPER'] = bb.get('BBU_20_2.0', df['Close'])
+                    df['BB_MIDDLE'] = bb.get('BBM_20_2.0', df['Close'])
+                    df['BB_LOWER'] = bb.get('BBL_20_2.0', df['Close'])
+                    df['BB_WIDTH'] = (df['BB_UPPER'] - df['BB_LOWER']) / df['BB_MIDDLE']
+            except Exception as e:
+                logging.warning(f"Bollinger Bands hatası: {e}")
+                df['BB_UPPER'] = df['Close']
+                df['BB_MIDDLE'] = df['Close']
+                df['BB_LOWER'] = df['Close']
+                df['BB_WIDTH'] = 0
             
+            # ATR
             df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
             
             # Volume Indicators
             df['VOLUME_SMA'] = ta.sma(df['Volume'], length=20)
-            df['VOLUME_RATIO'] = df['Volume'] / df['VOLUME_SMA']
+            df['VOLUME_RATIO'] = df['Volume'] / df['VOLUME_SMA'].replace(0, 1)
             
             # OBV
             df['OBV'] = ta.obv(df['Close'], df['Volume'])
@@ -210,120 +237,121 @@ class AdvancedTechnicalAnalyzer:
         patterns = []
         
         try:
-            # Head & Shoulders detection (basitleştirilmiş)
-            if len(df) > 100:
-                # Daha gelişmiş pattern recognition buraya eklenecek
-                pass
+            if len(df) < 50:
+                return ["Yeterli veri yok"]
                 
-            # Support/Resistance levels
+            # Basit destek/direnç seviyeleri
             resistance = df['High'].tail(50).max()
             support = df['Low'].tail(50).min()
             
-            patterns.append(f"Support: {support:.2f}")
-            patterns.append(f"Resistance: {resistance:.2f}")
+            patterns.append(f"Destek: {support:.2f}")
+            patterns.append(f"Direnç: {resistance:.2f}")
             
+            # Trend analizi
+            current_price = df['Close'].iloc[-1]
+            sma_50 = df['SMA_50'].iloc[-1] if 'SMA_50' in df else current_price
+            
+            if current_price > sma_50:
+                patterns.append("Trend: YÜKSELİŞ")
+            else:
+                patterns.append("Trend: DÜŞÜŞ")
+                
         except Exception as e:
             logging.error(f"Pattern detection error: {e}")
+            patterns = ["Pattern analiz hatası"]
             
         return patterns
 
     def calculate_fibonacci_levels(self, high, low):
         """Fibonacci seviyelerini hesapla"""
-        diff = high - low
-        return {
-            '0.0': low,
-            '23.6': high - diff * 0.236,
-            '38.2': high - diff * 0.382,
-            '50.0': high - diff * 0.5,
-            '61.8': high - diff * 0.618,
-            '78.6': high - diff * 0.786,
-            '100.0': high,
-            '127.2': high + diff * 0.272,
-            '161.8': high + diff * 0.618
-        }
+        try:
+            diff = high - low
+            return {
+                '0.0': low,
+                '23.6': high - diff * 0.236,
+                '38.2': high - diff * 0.382,
+                '50.0': high - diff * 0.5,
+                '61.8': high - diff * 0.618,
+                '78.6': high - diff * 0.786,
+                '100.0': high,
+                '127.2': high + diff * 0.272,
+                '161.8': high + diff * 0.618
+            }
+        except:
+            return {}
 
 class FundamentalAnalyzer:
     """Temel analiz sınıfı"""
     
-    def __init__(self):
-        pass
-        
     def analyze_stock(self, symbol):
         """Hisse senedi temel analizi"""
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.info
             
-            analysis = {
+            return {
                 'company_name': info.get('longName', 'N/A'),
                 'sector': info.get('sector', 'N/A'),
-                'market_cap': info.get('marketCap', 0),
-                'pe_ratio': info.get('trailingPE', 0),
-                'forward_pe': info.get('forwardPE', 0),
-                'peg_ratio': info.get('pegRatio', 0),
-                'price_to_book': info.get('priceToBook', 0),
-                'profit_margins': info.get('profitMargins', 0),
-                'operating_margins': info.get('operatingMargins', 0),
-                'return_on_equity': info.get('returnOnEquity', 0),
-                'debt_to_equity': info.get('debtToEquity', 0),
-                'revenue_growth': info.get('revenueGrowth', 0),
-                'earnings_growth': info.get('earningsGrowth', 0),
-                'dividend_yield': info.get('dividendYield', 0)
+                'market_cap': self.format_number(info.get('marketCap', 0)),
+                'pe_ratio': info.get('trailingPE', 'N/A'),
+                'price_to_book': info.get('priceToBook', 'N/A'),
+                'profit_margins': f"%{info.get('profitMargins', 0)*100:.1f}" if info.get('profitMargins') else 'N/A',
+                'dividend_yield': f"%{info.get('dividendYield', 0)*100:.2f}" if info.get('dividendYield') else 'N/A'
             }
-            
-            return analysis
         except Exception as e:
             logging.error(f"Fundamental analysis error: {e}")
-            return {}
+            return {'error': 'Temel analiz yapılamadı'}
 
     def analyze_crypto(self, symbol):
-        """Kripto temel analizi (basitleştirilmiş)"""
+        """Kripto temel analizi"""
         try:
-            # Bu kısım daha gelişmiş on-chain analiz ile genişletilebilir
-            analysis = {
-                'market_cap_rank': 'N/A',
-                'volume_rank': 'N/A',
-                'sentiment': 'NEUTRAL'
+            return {
+                'type': 'CRYPTO',
+                'analysis': 'On-chain analiz mevcut değil',
+                'market_sentiment': 'NÖTR'
             }
-            
-            return analysis
         except Exception as e:
             logging.error(f"Crypto analysis error: {e}")
-            return {}
+            return {'error': 'Kripto analiz hatası'}
+
+    def format_number(self, num):
+        """Sayıları formatla"""
+        if num >= 1e9:
+            return f"${num/1e9:.2f}B"
+        elif num >= 1e6:
+            return f"${num/1e6:.2f}M"
+        else:
+            return f"${num:.2f}"
 
 class RiskManager:
     """Gelişmiş risk yönetimi"""
     
-    def __init__(self):
-        pass
-        
     def calculate_position_size(self, account_size, risk_per_trade, stop_distance, current_price):
         """Pozisyon büyüklüğünü hesapla"""
-        risk_amount = account_size * (risk_per_trade / 100)
-        risk_per_unit = abs(current_price - stop_distance)
-        
-        if risk_per_unit > 0:
-            position_size = risk_amount / risk_per_unit
-            position_value = position_size * current_price
-            portfolio_percentage = (position_value / account_size) * 100
+        try:
+            risk_amount = account_size * (risk_per_trade / 100)
+            risk_per_unit = abs(current_price - stop_distance)
             
-            return {
-                'position_size': position_size,
-                'position_value': position_value,
-                'portfolio_percentage': portfolio_percentage,
-                'risk_amount': risk_amount
-            }
+            if risk_per_unit > 0:
+                position_size = risk_amount / risk_per_unit
+                position_value = position_size * current_price
+                portfolio_percentage = (position_value / account_size) * 100
+                
+                return {
+                    'position_size': position_size,
+                    'position_value': position_value,
+                    'portfolio_percentage': portfolio_percentage,
+                    'risk_amount': risk_amount
+                }
+        except Exception as e:
+            logging.error(f"Position size calculation error: {e}")
         
-        return None
-
-    def calculate_kelly_criterion(self, win_rate, avg_win, avg_loss):
-        """Kelly kriteri ile optimal pozisyon büyüklüğü"""
-        if avg_loss != 0:
-            win_ratio = avg_win / abs(avg_loss)
-            kelly = win_rate - ((1 - win_rate) / win_ratio)
-            # Conservative approach: Use half Kelly
-            return max(0, kelly * 0.5)
-        return 0.02  # Default 2% risk
+        return {
+            'position_size': 0,
+            'position_value': 0,
+            'portfolio_percentage': 0,
+            'risk_amount': 0
+        }
 
 # Global analyzer instances
 technical_analyzer = AdvancedTechnicalAnalyzer()
@@ -332,28 +360,147 @@ risk_manager = RiskManager()
 
 # Gemini AI initialization
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
     try:
+        genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
     except Exception as e:
         logging.warning(f"Gemini model error: {e}")
         model = None
 else:
     model = None
+    logging.warning("Gemini API key bulunamadı - Temel analiz kullanılacak")
+
+def convert_symbol(symbol):
+    """Sembol dönüşümü"""
+    symbol = symbol.upper().strip()
+    
+    symbol_map = {
+        'BTC': 'BTC-USD', 
+        'ETH': 'ETH-USD', 
+        'SOL': 'SOL-USD',
+        'ALTIN': 'GC=F', 
+        'GÜMÜŞ': 'SI=F', 
+        'PETROL': 'CL=F',
+        'BIST': 'XU100.IS', 
+        'VIOP': 'XU100.IS'
+    }
+    
+    if symbol in symbol_map:
+        return symbol_map[symbol]
+    elif ".IS" not in symbol and "=" not in symbol and "-" not in symbol and len(symbol) <= 5:
+        return f"{symbol}.IS"
+    
+    return symbol
+
+def generate_signal(df, last_data):
+    """Sinyal oluşturma"""
+    try:
+        price = last_data['Close']
+        rsi = last_data.get('RSI_14', 50)
+        macd = last_data.get('MACD', 0)
+        macd_signal = last_data.get('MACD_Signal', 0)
+        sma_50 = last_data.get('SMA_50', price)
+        
+        bullish_factors = 0
+        bearish_factors = 0
+        
+        # Trend faktörü
+        if price > sma_50:
+            bullish_factors += 2
+        else:
+            bearish_factors += 2
+            
+        # Momentum faktörü
+        if rsi < 40:
+            bullish_factors += 1
+        elif rsi > 60:
+            bearish_factors += 1
+            
+        # MACD faktörü
+        if macd > macd_signal:
+            bullish_factors += 1
+        else:
+            bearish_factors += 1
+            
+        # Sonuç
+        if bullish_factors - bearish_factors >= 3:
+            return "STRONG BUY", "85", "MEDIUM"
+        elif bullish_factors - bearish_factors >= 1:
+            return "BUY", "70", "MEDIUM"
+        elif bearish_factors - bullish_factors >= 3:
+            return "STRONG SELL", "80", "HIGH"
+        elif bearish_factors - bullish_factors >= 1:
+            return "SELL", "65", "HIGH"
+        else:
+            return "HOLD", "60", "LOW"
+    except Exception as e:
+        logging.error(f"Signal generation error: {e}")
+        return "HOLD", "50", "MEDIUM"
+
+def generate_basic_analysis(symbol, price, signal, confidence, stop_loss, position_data, patterns, fundamental):
+    """Temel analiz oluşturma"""
+    try:
+        target_1 = price + (price - stop_loss) * 2
+        target_2 = price + (price - stop_loss) * 3
+        target_3 = price + (price - stop_loss) * 4
+        
+        risk_reward_1 = (target_1 - price) / (price - stop_loss) if (price - stop_loss) > 0 else 0
+        
+        patterns_text = "\n".join(patterns[:3]) if patterns else "Pattern analiz edilemedi"
+        
+        fundamental_text = ""
+        if fundamental and 'error' not in fundamental:
+            for key, value in list(fundamental.items())[:3]:
+                fundamental_text += f"{key}: {value}\n"
+        
+        return f"""
+🦁 **PROMETHEUS AI v8.0 - {symbol} ANALİZİ**
+
+🎯 **SİNYAL:** {signal}
+📊 **GÜVEN:** %{confidence} | 🚨 **RİSK:** MEDIUM
+
+💡 **ANA TEZİS:** Teknik göstergeler {signal.lower()} sinyali veriyor.
+
+📈 **TEKNİK ANALİZ:**
+{patterns_text}
+
+📊 **GÖSTERGE MATRİSİ:**
+• RSI: {price:.1f} | Trend: {signal.split()[0]}
+• Key Levels: S:{stop_loss:.2f} R:{target_1:.2f}
+
+💰 **FUNDAMENTAL:**
+{fundamental_text if fundamental_text else 'Temel analiz mevcut değil'}
+
+🎯 **İŞLEM PLANI:**
+• Entry: {price:.2f} | Stop: {stop_loss:.2f}
+• Target 1: {target_1:.2f} (R:R {risk_reward_1:.1f})
+• Target 2: {target_2:.2f}
+• Target 3: {target_3:.2f}
+
+⚡ **POZİSYON:** %{position_data['portfolio_percentage']:.1f} portfolio
+
+🚨 **RİSK FAKTÖRLERİ:**
+1. Piyasa volatilitesi
+2. Beklenmeyen haberler
+3. Teknik seviye kırılmaları
+
+✅ **AKSİYON LİSTESİ:**
+1. Stop loss belirle
+2. Pozisyon büyüklüğünü ayarla
+3. Hedefleri takip et
+---------------------------------------------------
+"""
+    except Exception as e:
+        logging.error(f"Basic analysis generation error: {e}")
+        return f"❌ Analiz oluşturulurken hata: {str(e)}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gelişmiş başlangıç mesajı"""
+    """Başlangıç mesajı"""
     msg = """
 🦁 **PROMETHEUS AI v8.0 - ULTIMATE TRADING ORACLE**
 
-🤖 **7-Katmanlı Derin Analiz Sistemi:**
-1. 📊 Price Action & Chart Patterns
-2. 📈 Technical Indicator Matrix  
-3. 🔢 Fibonacci & Mathematical Analysis
-4. 🎯 Support & Resistance Mastery
-5. 💼 Fundamental Analysis
-6. 😱 Market Sentiment & Psychology
-7. 🛡️ Advanced Risk Management
+🤖 **7-Katmanlı Derin Analiz Sistemi**
+📊 Teknik Analiz • 💼 Fundamental • 🛡️ Risk Management
 
 **Kullanım:**
 • Bir sembol yazın: `BTC`, `AAPL`, `THYAO`, `ALTIN`
@@ -362,7 +509,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   /scan [sembol] - Hızlı tarama
   /risk [sembol] - Risk analizi
 
-**Örnek:** `BTC`, `ETH-USD`, `THYAO.IS`, `AAPL`
+**Örnek:** `BTC`, `THYAO.IS`, `AAPL`
     """
     await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
 
@@ -377,26 +524,20 @@ async def quick_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 **{user_input}** hızlı taranıyor...")
     
     try:
-        # Sembol dönüşümü
-        yf_symbol = self.convert_symbol(user_input)
-        
-        # Veri çekme
-        df = yf.download(yf_symbol, period="2mo", interval="1d", progress=False)
+        yf_symbol = convert_symbol(user_input)
+        df = yf.download(yf_symbol, period="1mo", interval="1d", progress=False)
         
         if df.empty:
             await status_msg.edit_text(f"❌ Veri bulunamadı: `{user_input}`")
             return
             
-        # Teknik analiz
         df = technical_analyzer.calculate_all_indicators(df)
         last = df.iloc[-1]
         
-        # Hızlı analiz
         price = last['Close']
         rsi = last.get('RSI_14', 50)
         trend = "BULLISH" if price > last.get('SMA_50', price) else "BEARISH"
         
-        # Sinyal belirleme
         if rsi < 35 and trend == "BULLISH":
             signal = "STRONG BUY"
             confidence = "85%"
@@ -416,7 +557,7 @@ async def quick_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📈 **RSI:** {rsi:.1f} 
 🎯 **Trend:** {trend}
 
-💡 **Öneri:** Detaylı analiz için `/analiz {user_input}` kullanın.
+💡 **Öneri:** Detaylı analiz için `/analiz {user_input}`
         """
         
         await status_msg.edit_text(response, parse_mode=constants.ParseMode.MARKDOWN)
@@ -435,51 +576,36 @@ async def analyze_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔮 **{user_input}** 7-katmanlı analiz başlatılıyor...")
 
     try:
-        # Sembol dönüşümü
         yf_symbol = convert_symbol(user_input)
-        
-        # Çoklu zaman dilimlerinde veri çekme
-        df_daily = yf.download(yf_symbol, period="6mo", interval="1d", progress=False)
-        df_weekly = yf.download(yf_symbol, period="1y", interval="1wk", progress=False)
+        df_daily = yf.download(yf_symbol, period="3mo", interval="1d", progress=False)
         
         if df_daily.empty:
             await status_msg.edit_text(f"❌ Veri bulunamadı: `{user_input}`")
             return
 
-        # Teknik analiz
         df_daily = technical_analyzer.calculate_all_indicators(df_daily)
         last = df_daily.iloc[-1]
         
-        # Pattern detection
         patterns = technical_analyzer.detect_chart_patterns(df_daily)
         
-        # Fibonacci levels
-        high_3m = df_daily['High'].max()
-        low_3m = df_daily['Low'].min()
-        fib_levels = technical_analyzer.calculate_fibonacci_levels(high_3m, low_3m)
-        
-        # Fundamental analiz
-        if ".IS" in yf_symbol or len(user_input) <= 5:
-            fundamental = fundamental_analyzer.analyze_stock(yf_symbol)
-        else:
-            fundamental = fundamental_analyzer.analyze_crypto(yf_symbol)
-        
-        # Risk management
         current_price = last['Close']
         atr = last.get('ATR', current_price * 0.02)
         stop_loss = current_price - (2 * atr)
         
         position_data = risk_manager.calculate_position_size(
-            account_size=10000,  # Varsayılan hesap büyüklüğü
-            risk_per_trade=2,    %2 risk
+            account_size=10000,
+            risk_per_trade=2,
             stop_distance=stop_loss,
             current_price=current_price
         )
         
-        # Sinyal belirleme
         signal, confidence, risk_level = generate_signal(df_daily, last)
         
-        # Gemini AI ile gelişmiş analiz
+        if ".IS" in yf_symbol or len(user_input) <= 5:
+            fundamental = fundamental_analyzer.analyze_stock(yf_symbol)
+        else:
+            fundamental = fundamental_analyzer.analyze_crypto(yf_symbol)
+        
         if model:
             try:
                 analysis_prompt = f"""
@@ -490,29 +616,22 @@ ANALIZ EDİLECEK VARLIK: {user_input} ({yf_symbol})
 TEKNİK VERİLER:
 • Fiyat: {current_price:.2f}
 • RSI: {last.get('RSI_14', 50):.1f}
-• MACD: {last.get('MACD', 0):.3f}
-• Trend: { 'BULLISH' if current_price > last.get('SMA_50', current_price) else 'BEARISH'}
+• Trend: {'BULLISH' if current_price > last.get('SMA_50', current_price) else 'BEARISH'}
 • ATR: {atr:.2f}
-• Volume Ratio: {last.get('VOLUME_RATIO', 1):.1f}x
 
-FIBONACCI SEVİYELERİ:
-• 61.8%: {fib_levels['61.8']:.2f}
-• 50%: {fib_levels['50.0']:.2f} 
-• 38.2%: {fib_levels['38.2']:.2f}
+PATTERNS: {patterns}
 
-TEMEL ANALİZ:
-{fundamental}
+TEMEL ANALİZ: {fundamental}
 
-TÜM BU VERİLERE GÖRE DETAYLI ANALİZ YAP:
+DETAYLI ANALİZ YAP:
 """
                 response = model.generate_content(analysis_prompt)
                 analysis_result = response.text
-                
             except Exception as e:
                 logging.error(f"Gemini analysis error: {e}")
-                analysis_result = generate_basic_analysis(user_input, current_price, signal, confidence, stop_loss, position_data)
+                analysis_result = generate_basic_analysis(user_input, current_price, signal, confidence, stop_loss, position_data, patterns, fundamental)
         else:
-            analysis_result = generate_basic_analysis(user_input, current_price, signal, confidence, stop_loss, position_data)
+            analysis_result = generate_basic_analysis(user_input, current_price, signal, confidence, stop_loss, position_data, patterns, fundamental)
         
         await status_msg.edit_text(analysis_result, parse_mode=constants.ParseMode.MARKDOWN)
         
@@ -520,121 +639,15 @@ TÜM BU VERİLERE GÖRE DETAYLI ANALİZ YAP:
         logging.error(f"Analysis error: {e}")
         await status_msg.edit_text(f"❌ Analiz hatası: {str(e)}")
 
-def convert_symbol(symbol):
-    """Sembol dönüşümü"""
-    symbol = symbol.upper()
-    
-    symbol_map = {
-        'BTC': 'BTC-USD', 'ETH': 'ETH-USD', 'SOL': 'SOL-USD',
-        'ALTIN': 'GC=F', 'GÜMÜŞ': 'SI=F', 'PETROL': 'CL=F',
-        'BIST': 'XU100.IS', 'VIOP': 'XU100.IS'
-    }
-    
-    if symbol in symbol_map:
-        return symbol_map[symbol]
-    elif ".IS" not in symbol and "=" not in symbol and "-" not in symbol and len(symbol) <= 5:
-        return f"{symbol}.IS"
-    
-    return symbol
-
-def generate_signal(df, last_data):
-    """Sinyal oluşturma"""
-    price = last_data['Close']
-    rsi = last_data.get('RSI_14', 50)
-    macd = last_data.get('MACD', 0)
-    macd_signal = last_data.get('MACD_Signal', 0)
-    sma_20 = last_data.get('SMA_20', price)
-    sma_50 = last_data.get('SMA_50', price)
-    
-    # Çoklu faktörlü sinyal sistemi
-    bullish_factors = 0
-    bearish_factors = 0
-    
-    # Trend faktörü
-    if price > sma_50 and sma_20 > sma_50:
-        bullish_factors += 2
-    else:
-        bearish_factors += 2
-        
-    # Momentum faktörü
-    if rsi < 40:
-        bullish_factors += 1
-    elif rsi > 60:
-        bearish_factors += 1
-        
-    # MACD faktörü
-    if macd > macd_signal:
-        bullish_factors += 1
-    else:
-        bearish_factors += 1
-        
-    # Sonuç
-    if bullish_factors - bearish_factors >= 3:
-        return "STRONG BUY", "85", "MEDIUM"
-    elif bullish_factors - bearish_factors >= 1:
-        return "BUY", "70", "MEDIUM"
-    elif bearish_factors - bullish_factors >= 3:
-        return "STRONG SELL", "80", "HIGH"
-    elif bearish_factors - bullish_factors >= 1:
-        return "SELL", "65", "HIGH"
-    else:
-        return "HOLD", "60", "LOW"
-
-def generate_basic_analysis(symbol, price, signal, confidence, stop_loss, position_data):
-    """Temel analiz oluşturma"""
-    target_1 = price + (price - stop_loss) * 2
-    target_2 = price + (price - stop_loss) * 3
-    target_3 = price + (price - stop_loss) * 4
-    
-    risk_reward_1 = (target_1 - price) / (price - stop_loss)
-    
-    return f"""
-🦁 **PROMETHEUS AI v8.0 - {symbol} ANALİZİ**
-
-🎯 **SİNYAL:** {signal}
-📊 **GÜVEN:** %{confidence} | 🚨 **RİSK:** MEDIUM
-
-💡 **ANA TEZİS:** Teknik göstergeler {signal.lower()} sinyali veriyor. Risk/yük oranı uygun.
-
-📈 **TEKNİK ANALİZ:**
-• Trend: Mevcut trend destekleniyor
-• Pattern: Çoklu teknik faktör uyumlu
-• Key Levels: S:{stop_loss:.2f} R:{target_1:.2f}
-• Momentum: Göstergeler {signal.split()[0].lower()} yönünde
-
-💰 **FUNDAMENTAL:** Temel veriler teknik analizi destekliyor
-
-😱 **SENTIMENT:** Piyasa dengeli, aşırı uçlarda değil
-
-🎯 **İŞLEM PLANI:**
-• Entry: {price:.2f} | Stop: {stop_loss:.2f} (%{(price-stop_loss)/price*100:.1f})
-• Target 1: {target_1:.2f} (R:R {risk_reward_1:.1f})
-• Target 2: {target_2:.2f} (R:R 3.0)
-• Target 3: {target_3:.2f} (R:R 4.0)
-
-⚡ **POZİSYON:** %{position_data['portfolio_percentage']:.1f} portfolio ({position_data['position_size']:.0f} birim)
-
-🚨 **RİSK FAKTÖRLERİ:**
-1. Genel piyasa koşulları
-2. Beklenmeyen haberler
-3. Teknik seviyelerin kırılması
-
-✅ **AKSİYON LİSTESİ:**
-1. Stop loss belirle
-2. Pozisyon büyüklüğünü ayarla
-3. Hedef seviyeleri takip et
----------------------------------------------------
-"""
-
 async def risk_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Risk analizi komutu"""
+    """Risk analizi"""
     user_input = update.message.text.upper().replace("/RISK", "").strip()
     
     if not user_input:
         await update.message.reply_text("📌 Risk analizi için sembol girin: `/risk BTC`")
         return
         
-    status_msg = await update.message.reply_text(f"🛡️ **{user_input}** risk analizi yapılıyor...")
+    status_msg = await update.message.reply_text(f"🛡️ **{user_input}** risk analizi...")
     
     try:
         yf_symbol = convert_symbol(user_input)
@@ -651,36 +664,24 @@ async def risk_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         atr = last.get('ATR', current_price * 0.02)
         volatility_ratio = atr / current_price
         
-        # Risk seviyesi belirleme
         if volatility_ratio > 0.05:
             risk_level = "HIGH"
-            risk_color = "🔴"
         elif volatility_ratio > 0.03:
-            risk_level = "MEDIUM" 
-            risk_color = "🟡"
+            risk_level = "MEDIUM"
         else:
             risk_level = "LOW"
-            risk_color = "🟢"
             
-        # Maximum drawdown
-        rolling_max = df['Close'].expanding().max()
-        daily_drawdown = (df['Close'] - rolling_max) / rolling_max
-        max_drawdown = daily_drawdown.min() * 100
-        
         response = f"""
 🛡️ **RISK ANALİZİ - {user_input}**
 
-{risk_color} **RISK SEVİYESİ:** {risk_level}
-📊 **Volatilite Oranı:** %{volatility_ratio*100:.1f}
-📉 **Max Drawdown (3ay):** %{max_drawdown:.1f}
-📈 **ATR (14):** {atr:.2f}
+📊 **Risk Seviyesi:** {risk_level}
+📈 **Volatilite:** %{volatility_ratio*100:.1f}
+🎯 **ATR:** {atr:.2f}
 
-💡 **RISK YÖNETİMİ ÖNERİLERİ:**
+💡 **Öneriler:**
 • Stop Loss: {current_price - (2*atr):.2f}
-• Position Size: Max %2 portfolio risk
-• Correlation: Diğer pozisyonlarla korelasyonu kontrol et
-
-🎯 **İŞLEM ÖNERİSİ:** {risk_level} risk seviyesi için uygun pozisyon büyüklüğü: %1-2
+• Position Size: Max %2 risk
+• Dikkatli izleme önerilir
 """
         await status_msg.edit_text(response, parse_mode=constants.ParseMode.MARKDOWN)
         
@@ -689,10 +690,13 @@ async def risk_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def start_bot():
     """Botu başlat"""
-    if TELEGRAM_TOKEN:
+    if not TELEGRAM_TOKEN:
+        logging.error("TELEGRAM_TOKEN bulunamadı!")
+        return
+        
+    try:
         application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         
-        # Command handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("analiz", analyze_symbol))
         application.add_handler(CommandHandler("analysis", analyze_symbol))
@@ -700,9 +704,11 @@ def start_bot():
         application.add_handler(CommandHandler("risk", risk_analysis))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_symbol))
         
+        logging.info("Bot başlatılıyor...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
-    else:
-        logging.warning("Telegram token bulunamadı!")
+        
+    except Exception as e:
+        logging.error(f"Bot başlatma hatası: {e}")
 
 if __name__ == '__main__':
     keep_alive()
