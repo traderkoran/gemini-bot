@@ -1465,4 +1465,10 @@ def start_bot():
 
 if __name__ == '__main__':
     keep_alive()
-    start_bot()
+    try:
+        start_bot()
+    except KeyboardInterrupt:
+        logging.info("Bot kapatılıyor...")
+    except Exception as e:
+        logging.error(f"Bot başlatma hatası: {e}")
+        raise
