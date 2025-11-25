@@ -7,6 +7,4 @@ flask>=3.0.0
 numpy>=1.26.0
 requests>=2.31.0
 gunicorn>=21.2.0
-scipy>=1.11.0
-scikit-learn>=1.4.0
-ta-lib>=0.4.28
+ta>=0.10.0
